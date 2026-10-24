@@ -325,10 +325,11 @@ class DormPowerCpPlugin(Star):
         args = self._args(event, "电量搜房")
         if not args:
             yield event.plain_result(
-                "用法：/电量搜房 <楼栋关键词> [楼层关键词] [房间号关键词]\n"
-                "例如：/电量搜房 4栋 1层 101"
+                "用法：/电量搜房 <楼栋> [楼层] [房间号]\n"
+                "例如：/电量搜房 3栋 3楼 335 或 /电量搜房 3栋3楼335号"
             )
             return
+        args = self._normalize_search_args(args)
         try:
             results = await self._search_rooms(args)
         except Exception as e:
@@ -352,10 +353,45 @@ class DormPowerCpPlugin(Star):
         )
         yield event.plain_result("匹配结果：\n" + "\n".join(lines) + "\n" + tail)
 
+    @staticmethod
+    def _cn2digit(s: str) -> str:
+        """把中文数字替换为阿拉伯数字（学生公寓三栋 -> 学生公寓3栋）。"""
+        for k, v in {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
+                     "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}.items():
+            s = s.replace(k, v)
+        return s
+
+    @staticmethod
+    def _normalize_search_args(args: list[str]) -> list[str]:
+        """拆分并归一化搜房关键词。
+
+        支持紧凑输入与常见说法：
+          '3栋3楼335号'    -> ['3栋', '3层', '335']
+          '3栋 3楼 335'   -> ['3栋', '3层', '335']
+          '三栋 3层 335'  -> ['三栋', '3层', '335']
+        """
+        if len(args) == 1:
+            text = args[0]
+            m = re.fullmatch(
+                r"([\d一二三四五六七八九十]+)栋\s*([\d一二三四五六七八九十]+)(?:楼|层)\s*(\d+)(?:号|房间|房)?",
+                text,
+            )
+            if m:
+                b, f, r = m.groups()
+                args = [f"{b}栋", f"{f}层", r]
+        norm = []
+        for a in args:
+            a = a.strip()
+            a = re.sub(r"^([\d一二三四五六七八九十]+)楼$", r"\1层", a)
+            a = re.sub(r"(\d+)(?:号|房)$", r"\1", a)
+            norm.append(a)
+        return norm
+
     async def _search_rooms(self, args: list[str]) -> list[tuple[str, str]]:
         """按关键词逐级下探搜索房间，返回 [(room_id, 展示名)]。
 
         一级关键词匹配楼栋，二级匹配楼层，三级匹配房间号。
+        支持中文数字楼栋名（如「学生公寓三栋」匹配「3栋」）与紧凑输入。
         """
         # 1. 校区 -> 楼栋
         areas = await self._get_rooms(1)
@@ -371,9 +407,15 @@ class DormPowerCpPlugin(Star):
         kw_building = args[0]
         matched_buildings = [b for b in buildings if kw_building in b[3]]
         if not matched_buildings:
-            fuzzy = kw_building.replace("栋", "").strip()
+            kw_norm = self._cn2digit(kw_building)
             matched_buildings = [
-                b for b in buildings if fuzzy and fuzzy in b[3].replace("栋", "")
+                b for b in buildings if kw_norm in self._cn2digit(b[3])
+            ]
+        if not matched_buildings:
+            fuzzy = self._cn2digit(kw_building).replace("栋", "").strip()
+            matched_buildings = [
+                b for b in buildings
+                if fuzzy and fuzzy in self._cn2digit(b[3]).replace("栋", "")
             ]
         if not matched_buildings:
             return []
@@ -381,7 +423,7 @@ class DormPowerCpPlugin(Star):
             return [("", f"{b[2]} {b[3]}（继续加楼层关键词）") for b in matched_buildings]
 
         # 2. 楼层
-        kw_floor = args[1]
+        kw_floor = args[1].replace("楼", "层")
         floors = []
         for areaid, bid, aname, bname in matched_buildings:
             try:
@@ -390,7 +432,10 @@ class DormPowerCpPlugin(Star):
                 continue
             for f in fs:
                 floors.append((areaid, bid, aname, bname, f["id"], f["name"]))
-        matched_floors = [f for f in floors if kw_floor in f[5]]
+        matched_floors = [
+            f for f in floors
+            if kw_floor in f[5] or kw_floor.rstrip("层") in f[5]
+        ]
         if not matched_floors:
             return []
         if len(args) == 2:
@@ -406,7 +451,10 @@ class DormPowerCpPlugin(Star):
                 continue
             for r in rs:
                 rooms.append((r["id"], f"{bname} {fname} {r['name']}"))
-        return [r for r in rooms if kw_room in r[1]]
+        return [
+            r for r in rooms
+            if kw_room in r[1] or kw_room in r[1].replace("房间", "")
+        ]
 
     # ---------- 命令：绑定/解绑/推送 ----------
     @filter.command("电量绑定")
