@@ -20,7 +20,15 @@
 - `businesstype`：业务类型（账单 item 的 `flag`，用电一般为 `2`）
 - `api_url`：云支付网关地址（`https://云支付域名/paygateway/smallpaygateway/trade`）
 
-### 推荐方式：一键探测脚本
+### 推荐方式一：配置页粘贴链接，保存后自动解析
+
+1. 在 AstrBot 管理面板打开本插件的「插件配置」；
+2. 在第一个输入框「云支付缴费链接」中粘贴你的完美校园缴费页链接；
+3. 点击保存，插件会自动解析并回填 `schoolcode` / `payproid` / `businesstype` / `api_url`。
+
+无需手动填写任何学校参数。
+
+### 推荐方式二：一键探测脚本
 
 仓库自带 `tools/detect_config.py`，**只需粘贴一次你的缴费链接**，自动解析出全部配置，还能顺带搜索并验证你的宿舍房间电量：
 
@@ -54,10 +62,11 @@ python3 detect_config.py "你的完美校园缴费链接"
 
 | 配置项 | 说明 | 默认值 |
 |---|---|---|
-| `schoolcode` | 学校代码（云支付 `customerId`） | 空（必须配置） |
-| `payproid` | 用电缴费项目 ID（账单 item 的 `id`） | 空（必须配置） |
+| `pay_url` | 云支付缴费链接（粘贴保存后自动解析并清空） | 空 |
+| `schoolcode` | 学校代码（云支付 `customerId`） | 空（可自动解析） |
+| `payproid` | 用电缴费项目 ID（账单 item 的 `id`） | 空（可自动解析） |
 | `businesstype` | 业务类型（账单 item 的 `flag`） | `2` |
-| `api_url` | 云支付网关地址 | 空（必须配置） |
+| `api_url` | 云支付网关地址 | 空（可自动解析） |
 | `default_room` | 默认房间 ID（用 /电量搜房 获取） | 空（可用命令绑定） |
 | `warn_threshold` | 低电量预警阈值（度） | `20` |
 | `cron_hours` | 每日定时播报小时 | `8,20` |

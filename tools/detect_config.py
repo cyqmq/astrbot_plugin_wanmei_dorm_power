@@ -14,11 +14,14 @@
 仅依赖 Python 标准库，无需安装任何第三方包。
 """
 import json
+import os
 import re
 import sys
 import time
-import urllib.parse
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from pay_url_parser import parse_pay_url  # noqa: E402
 
 GATEWAY_PATH = "/paygateway/smallpaygateway/trade"
 SOURCE_ID = 2
@@ -76,46 +79,6 @@ def get_room_state(api_url: str, schoolcode: str, payproid: str,
     if data.get("returncode") != "SUCCESS":
         raise RuntimeError(data.get("returnmsg") or data.get("subMsg") or "接口返回失败")
     return data.get("businessData") or {}
-
-
-# ---------- 解析缴费链接 ----------
-def parse_pay_url(url: str) -> dict:
-    base, _, frag = url.partition("#")
-    parsed = urllib.parse.urlparse(base)
-    query = urllib.parse.parse_qs(parsed.query)
-    host = parsed.netloc
-
-    schoolcode = ""
-    for key in ("customerId", "customercode", "schoolcode", "schoolCode"):
-        if query.get(key):
-            schoolcode = query[key][0]
-            break
-
-    api_url = f"https://{host}{GATEWAY_PATH}"
-
-    payproid, businesstype, payproname = "", "", ""
-    if "billDetail" in frag and "?" in frag:
-        frag_query = urllib.parse.parse_qs(frag.split("?", 1)[1])
-        item_str = frag_query.get("item", [""])[0]
-        item = None
-        for raw in (urllib.parse.unquote(item_str), item_str):
-            try:
-                item = json.loads(raw)
-                break
-            except (ValueError, TypeError):
-                continue
-        if isinstance(item, dict):
-            payproid = str(item.get("id") or item.get("discountsTextProjectId") or "")
-            businesstype = str(item.get("flag") or "")
-            payproname = item.get("payproname") or ""
-
-    return {
-        "api_url": api_url,
-        "schoolcode": schoolcode,
-        "payproid": payproid,
-        "businesstype": businesstype,
-        "payproname": payproname,
-    }
 
 
 # ---------- 交互式房间搜索 ----------

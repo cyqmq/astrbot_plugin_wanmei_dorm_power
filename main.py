@@ -14,9 +14,11 @@
 数据保存在 AstrBot 数据目录 data/plugin_data/<插件名>/users.json。
 """
 import asyncio
+import importlib.util
 import json
 import os
 import re
+import sys
 import time
 
 import aiohttp
@@ -28,6 +30,25 @@ from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "astrbot_plugin_wanmei_dorm_power"
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_side_module(mod_name: str, filename: str):
+    """按文件路径加载同目录模块（AstrBot 插件相对导入不一定可用）。"""
+    path = os.path.join(PLUGIN_DIR, filename)
+    if os.path.isfile(path):
+        spec = importlib.util.spec_from_file_location(mod_name, path)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[mod_name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+    return None
+
+
+_pay_parser = _load_side_module("_pay_url_parser", "pay_url_parser.py")
+if _pay_parser is not None:
+    parse_pay_url = _pay_parser.parse_pay_url
+else:  # 兜底：正常 import 路径可用时
+    from pay_url_parser import parse_pay_url  # type: ignore
 
 
 def _resolve_data_dir() -> str:
@@ -199,8 +220,49 @@ class DormPowerCpPlugin(Star):
         return [a for a in re.split(r"[\s,，、]+", rest) if a]
 
     # ---------- 配置检查 ----------
+    def _try_auto_configure(self) -> bool:
+        """从配置里的 pay_url（缴费链接）自动解析并回填核心配置。
+
+        用户只需在管理面板粘贴缴费链接并保存；插件在初始化或收到命令时
+        检测到 pay_url 尚未解析，则自动解析出 schoolcode / payproid /
+        businesstype / api_url 写入配置，并清空 pay_url，避免重复解析。
+        """
+        if self.config is None:
+            return False
+        pay_url = str(self._cfg("pay_url", "") or "").strip()
+        if not pay_url:
+            return False
+        try:
+            cfg = parse_pay_url(pay_url)
+        except Exception as e:
+            logger.error(f"[{PLUGIN_NAME}] 缴费链接解析失败: {e}")
+            return False
+        if not cfg.get("schoolcode") or not cfg.get("payproid") or not cfg.get("api_url"):
+            logger.warning(f"[{PLUGIN_NAME}] 缴费链接解析结果不完整: {cfg}")
+            return False
+        try:
+            changed = False
+            for key in ("schoolcode", "payproid", "businesstype", "api_url"):
+                value = cfg[key]
+                if str(self._cfg(key, "") or "") != str(value):
+                    self.config[key] = value
+                    changed = True
+            self.config["pay_url"] = ""
+            self.config.save_config()
+            if changed:
+                logger.info(
+                    f"[{PLUGIN_NAME}] 已从缴费链接自动解析配置："
+                    f"schoolcode={cfg['schoolcode']} payproid={cfg['payproid']} "
+                    f"businesstype={cfg['businesstype']} api_url={cfg['api_url']}"
+                )
+        except Exception as e:
+            logger.error(f"[{PLUGIN_NAME}] 配置自动保存失败: {e}")
+            return False
+        return True
+
     def _config_missing(self) -> str | None:
         """检查核心配置是否齐全；缺失时返回提示文案。"""
+        self._try_auto_configure()
         missing = []
         if not self._schoolcode:
             missing.append("schoolcode（学校代码）")
@@ -212,8 +274,8 @@ class DormPowerCpPlugin(Star):
             return None
         return (
             "插件核心配置未设置：" + "、".join(missing) + "。\n"
-            "请用仓库 tools/detect_config.py 解析你的缴费链接自动获取，"
-            "或在 AstrBot 管理面板「插件配置」中手动填写。"
+            "可在 AstrBot 管理面板「插件配置」的『云支付缴费链接』中粘贴你的缴费链接并保存，"
+            "插件会自动解析配置；或用仓库 tools/detect_config.py 手动获取。"
         )
 
     # ---------- 格式化电量 ----------
@@ -405,11 +467,13 @@ class DormPowerCpPlugin(Star):
 
     # ---------- 定时任务 ----------
     async def initialize(self):
+        auto = self._try_auto_configure()
         hours = str(self._cfg("cron_hours", "8,20") or "8,20")
         self.scheduler.add_job(self._scheduled_report, "cron", hour=hours, minute=0)
         self.scheduler.start()
         logger.info(
-            f"[{PLUGIN_NAME}] 插件已加载，定时播报小时: {hours}，已绑定用户: {len(self._users)}"
+            f"[{PLUGIN_NAME}] 插件已加载，定时播报小时: {hours}，"
+            f"已绑定用户: {len(self._users)}，自动解析配置: {'成功' if auto else '未触发'}"
         )
 
     async def terminate(self):

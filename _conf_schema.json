@@ -1,4 +1,10 @@
 {
+  "pay_url": {
+    "description": "云支付缴费链接（粘贴后保存，插件自动解析并回填下方配置）",
+    "type": "text",
+    "default": "",
+    "hint": "在完美校园打开「用电支出」缴费页，复制浏览器地址栏链接粘贴到这里，保存后插件会自动解析 schoolcode/payproid/api_url"
+  },
   "schoolcode": {
     "description": "学校代码（云支付 customerId/customercode）",
     "type": "string",
