@@ -1,0 +1,44 @@
+{
+  "schoolcode": {
+    "description": "学校代码（云支付 customerId/customercode）",
+    "type": "string",
+    "default": "",
+    "hint": "用 tools/detect_config.py 解析缴费链接自动获取，或在缴费页 URL 的 customerId= 参数查看"
+  },
+  "payproid": {
+    "description": "缴费项目 ID（用电支出的 payproid）",
+    "type": "string",
+    "default": "",
+    "hint": "用 tools/detect_config.py 解析缴费链接自动获取，或在缴费页 #/billDetail?item= 的 id 字段查看"
+  },
+  "businesstype": {
+    "description": "业务类型 flag",
+    "type": "string",
+    "default": "2",
+    "hint": "用电账单的 flag 一般为 2，在缴费页 #/billDetail?item= 的 flag 字段确认"
+  },
+  "api_url": {
+    "description": "云支付接口地址",
+    "type": "string",
+    "default": "",
+    "hint": "格式如 https://cloudpaygateway.xxx.com:端口/paygateway/smallpaygateway/trade，用脚本自动生成"
+  },
+  "default_room": {
+    "description": "默认房间 ID（如 99-9--104-101），留空则由用户用命令绑定",
+    "type": "string",
+    "default": "",
+    "hint": "用 /电量搜房 或 tools/detect_config.py 获取房间ID后填入"
+  },
+  "warn_threshold": {
+    "description": "低电量预警阈值（度）",
+    "type": "float",
+    "default": 20,
+    "slider": {"min": 1, "max": 100, "step": 1}
+  },
+  "cron_hours": {
+    "description": "每日定时播报小时（逗号分隔）",
+    "type": "string",
+    "default": "8,20",
+    "hint": "例如 8,20 表示每天 8:00 和 20:00 播报"
+  }
+}
