@@ -1,6 +1,6 @@
 name: astrbot_plugin_wanmei_dorm_power # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: 宿舍电量提醒（云支付）
 desc: 通过完美校园云支付缴费接口查询宿舍剩余电量并定时提醒。配置页粘贴缴费链接即可自动解析学校参数，支持搜房绑定、定时播报、低电量预警。
-version: v1.3.0
+version: v1.3.1
 author: cyqmq
 repo: https://github.com/cyqmq/astrbot_plugin_wanmei_dorm_power

@@ -221,7 +221,9 @@ class DormPowerCpPlugin(Star):
             rest = tokens[0][len(cmd):] + " " + " ".join(tokens[1:])
         else:
             rest = ""
-        return [a for a in re.split(r"[\s,，、]+", rest) if a]
+        tokens = [a for a in re.split(r"[\s,，、]+", rest) if a]
+        # 过滤平台附加的元数据标记（如 NapCat 消息末尾的 [MSG_ID:xxx]）
+        return [a for a in tokens if not re.match(r"^\[[A-Z_]+:", a)]
 
     # ---------- 配置检查 ----------
     def _try_auto_configure(self) -> bool:
@@ -371,12 +373,11 @@ class DormPowerCpPlugin(Star):
             raw = raw[len("电量浏览"):]
         raw = raw.strip()
         args = [a for a in re.split(r"[\s,，、]+", raw) if a]
-        # 过滤命令名残留
-        args = [a for a in args if a not in ("电量浏览", "浏览")]
-        logger.info(
-            f"[{PLUGIN_NAME}] /电量浏览 原始消息={event.message_str!r} "
-            f"解析参数={args!r}"
-        )
+        # 过滤命令名残留与平台附加标记（如 [MSG_ID:xxx]）
+        args = [
+            a for a in args
+            if a not in ("电量浏览", "浏览") and not re.match(r"^\[[A-Z_]+:", a)
+        ]
         try:
             text = await self._browse(args)
         except Exception as e:
