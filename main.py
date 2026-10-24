@@ -81,6 +81,10 @@ class _ApiError(RuntimeError):
     """接口返回的业务错误。"""
 
 
+class _PickError(ValueError):
+    """递进式浏览时序号超出范围。"""
+
+
 @register(
     "astrbot_plugin_wanmei_dorm_power",
     "cyqmq",
@@ -353,6 +357,22 @@ class DormPowerCpPlugin(Star):
         )
         yield event.plain_result("匹配结果：\n" + "\n".join(lines) + "\n" + tail)
 
+    # ---------- 命令：递进式浏览 ----------
+    @filter.command("电量浏览")
+    async def cmd_browse(self, event: AstrMessageEvent):
+        """递进式浏览校区/楼栋/楼层/房间：/电量浏览 [序号...]"""
+        err = self._config_missing()
+        if err:
+            yield event.plain_result(err)
+            return
+        args = self._args(event, "电量浏览")
+        try:
+            text = await self._browse(args)
+        except Exception as e:
+            yield event.plain_result(f"浏览失败：{e}")
+            return
+        yield event.plain_result(text)
+
     @staticmethod
     def _cn2digit(s: str) -> str:
         """把中文数字替换为阿拉伯数字（学生公寓三栋 -> 学生公寓3栋）。"""
@@ -455,6 +475,98 @@ class DormPowerCpPlugin(Star):
             r for r in rooms
             if kw_room in r[1] or kw_room in r[1].replace("房间", "")
         ]
+
+    # ---------- 递进式浏览 ----------
+    @staticmethod
+    def _pick(items: list[dict], idx: int) -> dict:
+        """按用户给的序号（从 1 开始）取出列表项，越界时抛 _PickError。"""
+        if idx < 1 or idx > len(items):
+            raise _PickError(f"序号 {idx} 超出范围（1~{len(items)}），请重新发送 /电量浏览。")
+        return items[idx - 1]
+
+    @staticmethod
+    def _only_note(items: list) -> str:
+        """当列表只有一个元素时给出提示，适配只有单个校区/单栋楼的学校。"""
+        return "（仅一个）" if len(items) == 1 else ""
+
+    async def _browse(self, args: list[str]) -> str:
+        """无状态递进式浏览：校区 → 楼栋 → 楼层 → 房间。
+
+        序号路径即状态：/电量浏览 1 2 3 表示「第1个校区 → 第2栋楼 → 第3层」。
+        """
+        if not args:
+            areas = await self._get_rooms(1)
+            if not areas:
+                return "未获取到校区信息。"
+            # 同名校区附上楼栋数量，方便用户区分（如两个「银屏岭校区」）
+            name_counts: dict[str, int] = {}
+            for a in areas:
+                name_counts[a["name"]] = name_counts.get(a["name"], 0) + 1
+            labels = []
+            for a in areas:
+                label = a["name"]
+                if name_counts[a["name"]] > 1:
+                    try:
+                        bs = await self._get_rooms(2, areaid=a["id"])
+                        label += f"（{len(bs)}栋）"
+                    except Exception:
+                        pass
+                labels.append(label)
+            lines = [f"{i + 1}. {labels[i]}{self._only_note(areas)}"
+                     for i in range(len(areas))]
+            return (
+                "🏫 请选择校区（发送 /电量浏览 <序号>）：\n"
+                + "\n".join(lines)
+                + "\n示例：/电量浏览 1"
+            )
+
+        if not all(a.isdigit() for a in args):
+            return "用法：/电量浏览 <序号...>，序号用空格分隔。\n例如：/电量浏览 1 2 3"
+        if len(args) > 4:
+            return "最多 4 级：校区 → 楼栋 → 楼层 → 房间。"
+
+        idxs = [int(a) for a in args]
+        areas = await self._get_rooms(1)
+        area = self._pick(areas, idxs[0])
+
+        if len(args) == 1:
+            bs = await self._get_rooms(2, areaid=area["id"])
+            lines = [f"{i + 1}. {b['name']}{self._only_note(bs)}"
+                     for i, b in enumerate(bs)]
+            return (
+                f"已选校区：{area['name']}\n"
+                "🏢 请选择楼栋（发送 /电量浏览 1 <序号>）：\n"
+                + "\n".join(lines)
+                + "\n示例：/电量浏览 1 1"
+            )
+
+        bs = await self._get_rooms(2, areaid=area["id"])
+        building = self._pick(bs, idxs[1])
+
+        if len(args) == 2:
+            fs = await self._get_rooms(3, areaid=area["id"], buildid=building["id"])
+            lines = [f"{i + 1}. {f['name']}{self._only_note(fs)}"
+                     for i, f in enumerate(fs)]
+            return (
+                f"已选：{area['name']} / {building['name']}\n"
+                "🏬 请选择楼层（发送 /电量浏览 1 {} <序号>）：\n".format(idxs[1])
+                + "\n".join(lines)
+                + f"\n示例：/电量浏览 1 {idxs[1]} 1"
+            )
+
+        fs = await self._get_rooms(3, areaid=area["id"], buildid=building["id"])
+        floor = self._pick(fs, idxs[2])
+
+        rs = await self._get_rooms(
+            4, areaid=area["id"], buildid=building["id"], levelid=floor["id"]
+        )
+        lines = [f"{i + 1}. {r['name']} → {r['id']}"
+                 for i, r in enumerate(rs)]
+        return (
+            f"已选：{area['name']} / {building['name']} / {floor['name']}\n"
+            "🛏️ 房间列表（发送 /电量绑定 <房间ID> 绑定）：\n"
+            + "\n".join(lines)
+        )
 
     # ---------- 命令：绑定/解绑/推送 ----------
     @filter.command("电量绑定")
