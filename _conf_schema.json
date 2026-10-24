@@ -24,7 +24,7 @@
     "hint": "格式如 https://cloudpaygateway.xxx.com:端口/paygateway/smallpaygateway/trade，用脚本自动生成"
   },
   "default_room": {
-    "description": "默认房间 ID（如 99-9--104-101），留空则由用户用命令绑定",
+    "description": "默认房间 ID（用 /电量搜房 获取），留空则由用户用命令绑定",
     "type": "string",
     "default": "",
     "hint": "用 /电量搜房 或 tools/detect_config.py 获取房间ID后填入"

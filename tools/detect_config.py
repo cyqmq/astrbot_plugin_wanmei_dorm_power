@@ -2,7 +2,7 @@
 """完美校园云支付宿舍电量插件 - 配置自动探测脚本。
 
 输入：你在完美校园「缴费页」收到的链接（形如
-      https://cloudpaygateway.xxx.com:端口/pay/index.html?...&customerId=1405#/billDetail?item={...}）
+      https://cloudpaygateway.xxx.com:端口/pay/index.html?...&customerId=<学校代码>#/billDetail?item={...}）
 输出：
   1. 插件需要的核心配置（schoolcode / payproid / businesstype / api_url）
   2. 可选：交互式搜索并验证你的宿舍房间电量
@@ -203,7 +203,7 @@ def main():
     missing = [k for k, v in cfg.items() if not v]
     if missing:
         print("解析失败，以下字段为空：", "、".join(missing))
-        print("请确认这是「缴费页」链接（形如 .../pay/index.html?...customerId=1405#/billDetail?item={...}）。")
+        print("请确认这是「缴费页」链接（形如 .../pay/index.html?...customerId=<学校代码>#/billDetail?item={...}）。")
         return
 
     print(f"\n解析结果：")

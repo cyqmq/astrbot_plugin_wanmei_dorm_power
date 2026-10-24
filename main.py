@@ -1,7 +1,7 @@
 """AstrBot 插件：宿舍电量自动提醒（完美校园云支付接口版）。
 
-适配「宿舍电量不在智能水电页、而是显示在云支付缴费页」的学校（如 customerId=1405）。
-数据接口为 cloudpaygateway.59wanmei.com 的 /paygateway/smallpaygateway/trade，
+适配「宿舍电量不在智能水电页、而是显示在云支付缴费页」的学校。
+数据接口为云支付网关的 /paygateway/smallpaygateway/trade，
 查询剩余电量无需登录 token。
 
 命令：

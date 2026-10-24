@@ -32,11 +32,11 @@ python3 detect_config.py "你的完美校园缴费链接"
 运行后会输出类似：
 
 ```
-"schoolcode": "1405"
-"payproid": "6353"
+"schoolcode": "<学校代码>"
+"payproid": "<缴费项目ID>"
 "businesstype": "2"
-"api_url": "https://cloudpaygateway.59wanmei.com:8087/paygateway/smallpaygateway/trade"
-"default_room": "99-9--104-101"
+"api_url": "https://<你的云支付域名>/paygateway/smallpaygateway/trade"
+"default_room": "<房间ID>"
 ```
 
 把这些值填到 AstrBot 管理面板 → 插件配置即可。
@@ -58,7 +58,7 @@ python3 detect_config.py "你的完美校园缴费链接"
 | `payproid` | 用电缴费项目 ID（账单 item 的 `id`） | 空（必须配置） |
 | `businesstype` | 业务类型（账单 item 的 `flag`） | `2` |
 | `api_url` | 云支付网关地址 | 空（必须配置） |
-| `default_room` | 默认房间 ID（如 `99-9--104-101`） | 空（可用命令绑定） |
+| `default_room` | 默认房间 ID（用 /电量搜房 获取） | 空（可用命令绑定） |
 | `warn_threshold` | 低电量预警阈值（度） | `20` |
 | `cron_hours` | 每日定时播报小时 | `8,20` |
 
@@ -67,7 +67,7 @@ python3 detect_config.py "你的完美校园缴费链接"
 ```
 /电量                     查询已绑定房间的剩余电量
 /电量搜房 4栋 1层 101      搜索房间（支持 1~3 级关键词，逐步缩小范围）
-/电量绑定 99-9--104-101   绑定房间（房间ID用 /电量搜房 获取）
+/电量绑定 <房间ID>   绑定房间（房间ID用 /电量搜房 获取）
 /电量解绑                 清空自己的绑定
 /电量推送                 在当前会话订阅每日定时播报
 ```
@@ -76,8 +76,8 @@ python3 detect_config.py "你的完美校园缴费链接"
 
 1. `/电量搜房 4栋` → 返回匹配的楼栋，提示继续加楼层；
 2. `/电量搜房 4栋 1层` → 返回匹配的楼层，提示继续加房间号；
-3. `/电量搜房 4栋 1层 101` → 返回房间及对应 ID（如 `99-9--104-101`）；
-4. `/电量绑定 99-9--104-101` → 绑定成功并显示当前电量；
+3. `/电量搜房 4栋 1层 101` → 返回房间及对应 ID（如 `<房间ID>`）；
+4. `/电量绑定 <房间ID>` → 绑定成功并显示当前电量；
 5. `/电量推送` → 开启每日定时播报，低于阈值自动提醒。
 
 ## 数据来源与原理
