@@ -365,7 +365,18 @@ class DormPowerCpPlugin(Star):
         if err:
             yield event.plain_result(err)
             return
-        args = self._args(event, "电量浏览")
+        raw = (event.message_str or "").strip().lstrip("/").strip()
+        # 剥离命令名（兼容带/不带斜杠、空格、粘连）
+        if raw.startswith("电量浏览"):
+            raw = raw[len("电量浏览"):]
+        raw = raw.strip()
+        args = [a for a in re.split(r"[\s,，、]+", raw) if a]
+        # 过滤命令名残留
+        args = [a for a in args if a not in ("电量浏览", "浏览")]
+        logger.info(
+            f"[{PLUGIN_NAME}] /电量浏览 原始消息={event.message_str!r} "
+            f"解析参数={args!r}"
+        )
         try:
             text = await self._browse(args)
         except Exception as e:
