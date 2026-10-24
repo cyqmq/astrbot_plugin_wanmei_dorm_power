@@ -2,6 +2,11 @@
 
 本项目版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v1.1.1] - 2026-10-24
+
+### 修复
+- 修复 `/电量搜房` 报错 `Attempt to decode JSON with unexpected mimetype: text/plain;charset=utf-8`：云支付接口返回的 Content-Type 为 `text/plain`（内容实为 JSON），改用 `resp.json(content_type=None)` 忽略类型检查
+
 ## [v1.1.0] - 2026-10-24
 
 ### 新增

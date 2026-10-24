@@ -150,7 +150,7 @@ class DormPowerCpPlugin(Star):
             async with session.post(self._api_url, json=payload) as resp:
                 if resp.status != 200:
                     raise _ApiError(f"HTTP {resp.status}")
-                data = await resp.json()
+                data = await resp.json(content_type=None)
         if data.get("returncode") != "SUCCESS":
             raise _ApiError(data.get("returnmsg") or data.get("subMsg") or "接口返回失败")
         return data
