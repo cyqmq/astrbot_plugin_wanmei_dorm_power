@@ -90,6 +90,23 @@ python3 detect_config.py "你的完美校园缴费链接"
 
 用户绑定数据保存在 `data/plugin_data/astrbot_plugin_wanmei_dorm_power/users.json`，仅含房间 ID 与会话来源，不含任何密码/凭证。
 
+## 常见问题
+
+### 从 GitHub 链接安装时报「插件校验失败」？
+
+通常是运行 AstrBot 的服务器无法访问 `raw.githubusercontent.com`（国内网络常见），
+日志里会看到 `Plugin repository validation failed ...:`（冒号后为空）。解决办法：
+
+1. **使用 GitHub 加速代理**（推荐）：
+   在 AstrBot 管理面板 → 插件 →「从链接安装」时，插件地址填
+   `https://github.com/cyqmq/astrbot_plugin_wanmei_dorm_power`，
+   代理地址填 `https://ghfast.top` 或 `https://ghproxy.net`，再点击校验/安装。
+
+2. **ZIP 上传安装**：
+   下载插件压缩包
+   `https://github.com/cyqmq/astrbot_plugin_wanmei_dorm_power/archive/refs/heads/main.zip`，
+   然后在 AstrBot 插件页使用「上传插件」选择该 ZIP 安装。
+
 ## 声明
 
 - 接口为完美校园私有协议，随时可能变更；若失效需重新抓包确认请求参数。
