@@ -89,7 +89,7 @@ class _PickError(ValueError):
     "astrbot_plugin_wanmei_dorm_power",
     "cyqmq",
     "宿舍电量提醒（完美校园云支付接口）",
-    "1.0.0",
+    "1.4.0",
 )
 class DormPowerCpPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -633,9 +633,36 @@ class DormPowerCpPlugin(Star):
         self._save_users()
         hours = str(self._cfg("cron_hours", "8,20") or "8,20")
         yield event.plain_result(
-            f"✅ 已订阅每日定时播报（{hours} 点）。"
-            f"电量低于 {self._warn_threshold:g} 度时会额外提醒。"
-        )
+                f"✅ 已订阅每日定时播报（{hours} 点）。"
+                f"电量低于 {self._warn_threshold:g} 度时会额外提醒。"
+            )
+
+    # ---------- LLM 自然语言工具 ----------
+    @filter.llm_tool(name="query_dorm_power")
+    async def tool_query_dorm_power(self, event: AstrMessageEvent):
+        """查询当前用户绑定的宿舍剩余电量（完美校园云支付）。
+
+        当用户询问宿舍还剩多少电、电量情况、电费余额时调用。
+        """
+        err = self._config_missing()
+        if err:
+            yield event.plain_result(err)
+            return
+        uid = event.get_sender_id()
+        info = self._users.get(uid)
+        room_id = (info or {}).get("room_id") or str(self._cfg("default_room", ""))
+        if not room_id:
+            yield event.plain_result(
+                "你还没有绑定宿舍房间。请先发送 /电量绑定 <房间ID> 绑定，"
+                "或发送 /电量浏览 按提示找到房间。"
+            )
+            return
+        try:
+            state = await self._get_room_state(room_id)
+            name = (info or {}).get("room_name") or room_id
+            yield event.plain_result(self._format_quantity(state, name))
+        except Exception as e:
+            yield event.plain_result(f"查询失败：{e}")
 
     # ---------- 定时任务 ----------
     async def initialize(self):
