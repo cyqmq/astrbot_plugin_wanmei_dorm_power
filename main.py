@@ -89,7 +89,7 @@ class _PickError(ValueError):
     "astrbot_plugin_wanmei_dorm_power",
     "cyqmq",
     "宿舍电量提醒（完美校园云支付接口）",
-    "1.4.0",
+    "1.4.1",
 )
 class DormPowerCpPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -684,11 +684,17 @@ class DormPowerCpPlugin(Star):
             logger.warning(f"[{PLUGIN_NAME}] 核心配置未设置，跳过定时播报")
             return
         self._load_users()
+        # 同一会话（如一个群）里多人绑定同一房间时只播报一次，避免重复刷屏
+        sent: set[tuple[str, str]] = set()
         for uid, info in self._users.items():
             origin = info.get("origin")
             room_id = info.get("room_id")
             if not origin or not room_id:
                 continue
+            key = (origin, room_id)
+            if key in sent:
+                continue
+            sent.add(key)
             try:
                 state = await self._get_room_state(room_id)
                 name = info.get("room_name") or room_id
