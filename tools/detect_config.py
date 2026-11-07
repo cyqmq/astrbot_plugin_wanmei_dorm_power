@@ -15,7 +15,6 @@
 """
 import json
 import os
-import re
 import sys
 import time
 import urllib.request
@@ -169,7 +168,7 @@ def main():
         print("请确认这是「缴费页」链接（形如 .../pay/index.html?...customerId=<学校代码>#/billDetail?item={...}）。")
         return
 
-    print(f"\n解析结果：")
+    print("\n解析结果：")
     print(f"  缴费项目名称 : {cfg['payproname']}")
     print(f"  学校代码     : {cfg['schoolcode']}")
     print(f"  缴费项目ID   : {cfg['payproid']}")

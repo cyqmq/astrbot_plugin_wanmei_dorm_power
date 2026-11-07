@@ -7,13 +7,14 @@
 命令：
   /电量                       查询已绑定房间的剩余电量
   /电量搜房 <楼栋> [楼层] [房间号]  搜索房间ID，如 /电量搜房 4栋 1层 101
+  /电量浏览 [序号...]          递进式浏览 校区→楼栋→楼层→房间
   /电量绑定 <房间ID>           绑定房间（ID 用 /电量搜房 获取）
   /电量解绑                   清空自己的绑定
   /电量推送                   在当前会话订阅每日定时播报
+  /电量推送开启 / 关闭 / 状态   启用、关闭或查看当前会话（群聊/私聊）的定时推送
 
 数据保存在 AstrBot 数据目录 data/plugin_data/<插件名>/users.json。
 """
-import asyncio
 import importlib.util
 import json
 import os
@@ -30,6 +31,9 @@ from astrbot.api.star import Context, Star, register
 
 PLUGIN_NAME = "astrbot_plugin_wanmei_dorm_power"
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# unified_msg_origin 格式: <platform>:<message_type>:<session_id>
+_MSG_TYPE_FRIEND = "FriendMessage"
 
 
 def _load_side_module(mod_name: str, filename: str):
@@ -71,6 +75,8 @@ def _resolve_data_dir() -> str:
 
 DATA_DIR = _resolve_data_dir()
 USER_DATA_PATH = os.path.join(DATA_DIR, "users.json")
+WHITELIST_PATH = os.path.join(DATA_DIR, "push_whitelist.json")
+ROOM_NAME_PATH = os.path.join(DATA_DIR, "room_names.json")
 
 
 def _now_ts() -> str:
@@ -89,7 +95,7 @@ class _PickError(ValueError):
     "astrbot_plugin_wanmei_dorm_power",
     "cyqmq",
     "宿舍电量提醒（完美校园云支付接口）",
-    "1.4.1",
+    "1.5.0",
 )
 class DormPowerCpPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -97,7 +103,14 @@ class DormPowerCpPlugin(Star):
         self.config = config
         self.scheduler = AsyncIOScheduler(timezone="Asia/Shanghai")
         self._users: dict[str, dict] = {}
+        # 推送白名单：origin -> True(显式开启) / False(显式关闭)；不在其中则跟随全局开关
+        self._whitelist: dict[str, bool] = {}
+        # 房间ID -> 友好名（如「4栋 1层 101」），绑定后展示用
+        self._room_names: dict[str, str] = {}
+        self._session: aiohttp.ClientSession | None = None
         self._load_users()
+        self._load_whitelist()
+        self._load_room_names()
 
     # ---------- 配置读取 ----------
     def _cfg(self, key: str, default=None):
@@ -140,7 +153,46 @@ class DormPowerCpPlugin(Star):
         except (TypeError, ValueError):
             return 20.0
 
+    @property
+    def _private_push_enabled(self) -> bool:
+        """全局是否允许私聊会话接收定时推送。"""
+        return bool(self._cfg("private_push_enabled", True))
+
+    @property
+    def _group_push_enabled(self) -> bool:
+        """全局是否允许群聊会话接收定时推送。"""
+        return bool(self._cfg("group_push_enabled", True))
+
+    # ---------- 推送开关判定 ----------
+    @staticmethod
+    def _session_is_private(origin: str) -> bool:
+        """根据 unified_msg_origin 判断会话是否为私聊。"""
+        try:
+            return origin.split(":")[1] == _MSG_TYPE_FRIEND
+        except IndexError:
+            return False
+
+    def _push_enabled_for(self, origin: str) -> bool:
+        """判断某会话当前是否允许接收推送。
+
+        优先级：会话白名单显式设置 > 全局私聊/群聊开关。
+        """
+        override = self._whitelist.get(origin)
+        if override is not None:
+            return override
+        if self._session_is_private(origin):
+            return self._private_push_enabled
+        return self._group_push_enabled
+
     # ---------- HTTP 调用 ----------
+    def _ensure_session(self) -> aiohttp.ClientSession:
+        """惰性创建并复用全局 aiohttp 会话，避免每次请求重建连接池。"""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15)
+            )
+        return self._session
+
     async def _post(self, method: str, biz: dict) -> dict:
         """向云支付网关发起 POST，返回解析后的 JSON。"""
         payload = {
@@ -149,12 +201,10 @@ class DormPowerCpPlugin(Star):
             "timestamp": _now_ts(),
             "sourceId": 2,
         }
-        timeout = aiohttp.ClientTimeout(total=15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(self._api_url, json=payload) as resp:
-                if resp.status != 200:
-                    raise _ApiError(f"HTTP {resp.status}")
-                data = await resp.json(content_type=None)
+        async with self._ensure_session().post(self._api_url, json=payload) as resp:
+            if resp.status != 200:
+                raise _ApiError(f"HTTP {resp.status}")
+            data = await resp.json(content_type=None)
         if data.get("returncode") != "SUCCESS":
             raise _ApiError(data.get("returnmsg") or data.get("subMsg") or "接口返回失败")
         return data
@@ -203,6 +253,50 @@ class DormPowerCpPlugin(Star):
         except OSError as e:
             logger.error(f"[{PLUGIN_NAME}] 用户数据保存失败: {e}")
 
+    # ---------- 推送白名单 ----------
+    def _load_whitelist(self):
+        try:
+            with open(WHITELIST_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            self._whitelist = {str(k): bool(v) for k, v in data.items()}
+        except Exception:
+            self._whitelist = {}
+
+    def _save_whitelist(self):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(WHITELIST_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._whitelist, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.error(f"[{PLUGIN_NAME}] 推送白名单保存失败: {e}")
+
+    # ---------- 房间友好名缓存 ----------
+    def _load_room_names(self):
+        try:
+            with open(ROOM_NAME_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            self._room_names = {str(k): str(v) for k, v in data.items()}
+        except Exception:
+            self._room_names = {}
+
+    def _save_room_names(self):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(ROOM_NAME_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._room_names, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.error(f"[{PLUGIN_NAME}] 房间名缓存保存失败: {e}")
+
+    def _remember_room_names(self, results: list[tuple[str, str]]):
+        """记录搜房/浏览得到的 房间ID->友好名，绑定后展示友好名。"""
+        changed = False
+        for rid, name in results:
+            if rid and self._room_names.get(rid) != name:
+                self._room_names[rid] = name
+                changed = True
+        if changed:
+            self._save_room_names()
+
     # ---------- 消息发送 ----------
     async def _send(self, origin: str, text: str) -> None:
         try:
@@ -212,15 +306,13 @@ class DormPowerCpPlugin(Star):
 
     @staticmethod
     def _args(event: AstrMessageEvent, cmd: str) -> list[str]:
-        """取指令参数，兼容带/不带 / 前缀、参数与指令名粘连、中文逗号顿号分隔。"""
+        """取指令参数，兼容带/不带 / 前缀、参数与指令名粘连、中文逗号顿号分隔。
+
+        注意：AstrBot 的 CommandFilter 已保证消息匹配该命令（命令名或命令名+空格），
+        因此只需剥离命令名前缀即可。
+        """
         text = (event.message_str or "").strip().lstrip("/").strip()
-        if text.startswith(cmd):
-            rest = text[len(cmd):]
-        elif text.split() and text.split()[0].startswith(cmd):
-            tokens = text.split()
-            rest = tokens[0][len(cmd):] + " " + " ".join(tokens[1:])
-        else:
-            rest = ""
+        rest = text[len(cmd):] if text.startswith(cmd) else ""
         tokens = [a for a in re.split(r"[\s,，、]+", rest) if a]
         # 过滤平台附加的元数据标记（如 NapCat 消息末尾的 [MSG_ID:xxx]）
         return [a for a in tokens if not re.match(r"^\[[A-Z_]+:", a)]
@@ -315,7 +407,7 @@ class DormPowerCpPlugin(Star):
             return
         try:
             state = await self._get_room_state(room_id)
-            name = (info or {}).get("room_name") or room_id
+            name = (info or {}).get("room_name") or self._room_names.get(room_id) or room_id
             yield event.plain_result(self._format_quantity(state, name))
         except Exception as e:
             yield event.plain_result(f"查询失败：{e}")
@@ -367,17 +459,7 @@ class DormPowerCpPlugin(Star):
         if err:
             yield event.plain_result(err)
             return
-        raw = (event.message_str or "").strip().lstrip("/").strip()
-        # 剥离命令名（兼容带/不带斜杠、空格、粘连）
-        if raw.startswith("电量浏览"):
-            raw = raw[len("电量浏览"):]
-        raw = raw.strip()
-        args = [a for a in re.split(r"[\s,，、]+", raw) if a]
-        # 过滤命令名残留与平台附加标记（如 [MSG_ID:xxx]）
-        args = [
-            a for a in args
-            if a not in ("电量浏览", "浏览") and not re.match(r"^\[[A-Z_]+:", a)
-        ]
+        args = self._args(event, "电量浏览")
         try:
             text = await self._browse(args)
         except Exception as e:
@@ -387,11 +469,35 @@ class DormPowerCpPlugin(Star):
 
     @staticmethod
     def _cn2digit(s: str) -> str:
-        """把中文数字替换为阿拉伯数字（学生公寓三栋 -> 学生公寓3栋）。"""
-        for k, v in {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
-                     "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}.items():
+        """把常见中文数字替换为阿拉伯数字（学生公寓三栋 -> 学生公寓3栋）。
+
+        支持「十」相关的两位组合：十=10、十二=12、二十=20、二十三=23。
+        """
+        digits = {"零": "0", "一": "1", "二": "2", "三": "3", "四": "4",
+                  "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"}
+
+        def _to_num(m):
+            inner = m.group(1)
+            if "十" in inner:
+                parts = inner.split("十")
+                tens = digits.get(parts[0], "1")
+                ones = digits.get(parts[1], "0") if len(parts) > 1 and parts[1] else "0"
+                return str(int(tens + ones))
+            return inner
+
+        s = re.sub(r"([零一二三四五六七八九]?十[零一二三四五六七八九]?)", _to_num, s)
+        for k, v in digits.items():
             s = s.replace(k, v)
         return s
+
+    @staticmethod
+    def _match_building(kw: str, name: str) -> bool:
+        """楼栋名匹配：直接包含，或归一化数字部分一致（如「3栋」匹配「3号楼」「三栋」）。"""
+        if kw in name:
+            return True
+        kw_digits = re.sub(r"\D", "", DormPowerCpPlugin._cn2digit(kw))
+        name_digits = re.sub(r"\D", "", DormPowerCpPlugin._cn2digit(name))
+        return bool(kw_digits) and kw_digits in name_digits
 
     @staticmethod
     def _normalize_search_args(args: list[str]) -> list[str]:
@@ -437,17 +543,11 @@ class DormPowerCpPlugin(Star):
                 buildings.append((area["id"], b["id"], area.get("name", ""), b["name"]))
 
         kw_building = args[0]
-        matched_buildings = [b for b in buildings if kw_building in b[3]]
+        matched_buildings = [b for b in buildings if self._match_building(kw_building, b[3])]
         if not matched_buildings:
             kw_norm = self._cn2digit(kw_building)
             matched_buildings = [
-                b for b in buildings if kw_norm in self._cn2digit(b[3])
-            ]
-        if not matched_buildings:
-            fuzzy = self._cn2digit(kw_building).replace("栋", "").strip()
-            matched_buildings = [
-                b for b in buildings
-                if fuzzy and fuzzy in self._cn2digit(b[3]).replace("栋", "")
+                b for b in buildings if self._match_building(kw_norm, b[3])
             ]
         if not matched_buildings:
             return []
@@ -483,10 +583,12 @@ class DormPowerCpPlugin(Star):
                 continue
             for r in rs:
                 rooms.append((r["id"], f"{bname} {fname} {r['name']}"))
-        return [
+        matched = [
             r for r in rooms
             if kw_room in r[1] or kw_room in r[1].replace("房间", "")
         ]
+        self._remember_room_names(matched)
+        return matched
 
     # ---------- 递进式浏览 ----------
     @staticmethod
@@ -572,8 +674,10 @@ class DormPowerCpPlugin(Star):
         rs = await self._get_rooms(
             4, areaid=area["id"], buildid=building["id"], levelid=floor["id"]
         )
-        lines = [f"{i + 1}. {r['name']} → {r['id']}"
-                 for i, r in enumerate(rs)]
+        rooms = [(r["id"], f"{building['name']} {floor['name']} {r['name']}")
+                 for r in rs]
+        self._remember_room_names(rooms)
+        lines = [f"{i + 1}. {name} → {rid}" for i, (rid, name) in enumerate(rooms)]
         return (
             f"已选：{area['name']} / {building['name']} / {floor['name']}\n"
             "🛏️ 房间列表（发送 /电量绑定 <房间ID> 绑定）：\n"
@@ -600,10 +704,15 @@ class DormPowerCpPlugin(Star):
         except Exception as e:
             yield event.plain_result(f"绑定失败：{e}（请确认房间ID是否正确）")
             return
+        if quantity is None:
+            yield event.plain_result(
+                "绑定失败：未查询到该房间的电量数据，请确认房间ID是否正确。"
+            )
+            return
         uid = event.get_sender_id()
         info = self._users.setdefault(uid, {})
         info["room_id"] = room_id
-        info["room_name"] = room_id
+        info["room_name"] = self._room_names.get(room_id, room_id)
         info["origin"] = event.unified_msg_origin
         self._save_users()
         yield event.plain_result(f"✅ 绑定成功！当前剩余电量：{quantity} {unit}")
@@ -619,7 +728,7 @@ class DormPowerCpPlugin(Star):
 
     @filter.command("电量推送")
     async def cmd_push(self, event: AstrMessageEvent):
-        """在当前会话订阅每日定时播报"""
+        """在当前会话订阅每日定时播报（同时开启本会话推送）"""
         err = self._config_missing()
         if err:
             yield event.plain_result(err)
@@ -631,11 +740,48 @@ class DormPowerCpPlugin(Star):
             return
         self._users[uid]["origin"] = event.unified_msg_origin
         self._save_users()
+        self._whitelist[event.unified_msg_origin] = True
+        self._save_whitelist()
         hours = str(self._cfg("cron_hours", "8,20") or "8,20")
         yield event.plain_result(
-                f"✅ 已订阅每日定时播报（{hours} 点）。"
+                f"✅ 已订阅每日定时播报（{hours} 点），本会话推送已开启。"
                 f"电量低于 {self._warn_threshold:g} 度时会额外提醒。"
             )
+
+    # ---------- 命令：推送开关 ----------
+    @filter.command("电量推送开启")
+    async def cmd_push_enable(self, event: AstrMessageEvent):
+        """启用当前会话（群聊/私聊）的定时推送"""
+        self._whitelist[event.unified_msg_origin] = True
+        self._save_whitelist()
+        yield event.plain_result("本会话推送已开启。")
+
+    @filter.command("电量推送关闭")
+    async def cmd_push_disable(self, event: AstrMessageEvent):
+        """关闭当前会话（群聊/私聊）的定时推送"""
+        self._whitelist[event.unified_msg_origin] = False
+        self._save_whitelist()
+        yield event.plain_result("本会话推送已关闭。")
+
+    @filter.command("电量推送状态")
+    async def cmd_push_status(self, event: AstrMessageEvent):
+        """查看当前会话推送开关状态"""
+        origin = event.unified_msg_origin
+        private = self._session_is_private(origin)
+        scope = "私聊" if private else "群聊"
+        enabled = self._push_enabled_for(origin)
+        override = self._whitelist.get(origin)
+        if override is not None:
+            mode = f"本会话已显式{'开启' if override else '关闭'}"
+        else:
+            mode = "跟随全局开关"
+        global_switch = self._private_push_enabled if private else self._group_push_enabled
+        yield event.plain_result(
+            f"当前会话：{scope}\n"
+            f"本会话推送：{'开启' if enabled else '关闭'}\n"
+            f"设置模式：{mode}\n"
+            f"全局{scope}推送开关：{'开启' if global_switch else '关闭'}"
+        )
 
     # ---------- LLM 自然语言工具 ----------
     @filter.llm_tool(name="query_dorm_power")
@@ -659,7 +805,7 @@ class DormPowerCpPlugin(Star):
             return
         try:
             state = await self._get_room_state(room_id)
-            name = (info or {}).get("room_name") or room_id
+            name = (info or {}).get("room_name") or self._room_names.get(room_id) or room_id
             yield event.plain_result(self._format_quantity(state, name))
         except Exception as e:
             yield event.plain_result(f"查询失败：{e}")
@@ -672,10 +818,14 @@ class DormPowerCpPlugin(Star):
         self.scheduler.start()
         logger.info(
             f"[{PLUGIN_NAME}] 插件已加载，定时播报小时: {hours}，"
-            f"已绑定用户: {len(self._users)}，自动解析配置: {'成功' if auto else '未触发'}"
+            f"已绑定用户: {len(self._users)}，白名单会话: {len(self._whitelist)}，"
+            f"自动解析配置: {'成功' if auto else '未触发'}"
         )
 
     async def terminate(self):
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+            self._session = None
         if getattr(self.scheduler, "running", False):
             self.scheduler.shutdown(wait=False)
 
@@ -684,12 +834,16 @@ class DormPowerCpPlugin(Star):
             logger.warning(f"[{PLUGIN_NAME}] 核心配置未设置，跳过定时播报")
             return
         self._load_users()
-        # 同一会话（如一个群）里多人绑定同一房间时只播报一次，避免重复刷屏
+        self._load_whitelist()
+        # 同一会话（如一个群）里多人绑定同一房间时只播报一次，避免重复刷屏；
+        # 仅推送允许的会话（白名单 + 全局私聊/群聊开关）
         sent: set[tuple[str, str]] = set()
         for uid, info in self._users.items():
             origin = info.get("origin")
             room_id = info.get("room_id")
             if not origin or not room_id:
+                continue
+            if not self._push_enabled_for(origin):
                 continue
             key = (origin, room_id)
             if key in sent:
@@ -697,7 +851,7 @@ class DormPowerCpPlugin(Star):
             sent.add(key)
             try:
                 state = await self._get_room_state(room_id)
-                name = info.get("room_name") or room_id
+                name = (info.get("room_name") or self._room_names.get(room_id) or room_id)
                 text = self._format_quantity(state, name)
                 await self._send(origin, text)
             except Exception as e:

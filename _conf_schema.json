@@ -46,5 +46,17 @@
     "type": "string",
     "default": "8,20",
     "hint": "例如 8,20 表示每天 8:00 和 20:00 播报"
+  },
+  "private_push_enabled": {
+    "description": "是否允许私聊会话接收定时推送",
+    "type": "boolean",
+    "default": true,
+    "hint": "关闭后，未在会话中显式开启的私聊将不推送；可用 /电量推送开启 单独开启某个私聊"
+  },
+  "group_push_enabled": {
+    "description": "是否允许群聊会话接收定时推送",
+    "type": "boolean",
+    "default": true,
+    "hint": "关闭后，未在会话中显式开启的群聊将不推送；可用 /电量推送开启 单独开启某个群"
   }
 }
