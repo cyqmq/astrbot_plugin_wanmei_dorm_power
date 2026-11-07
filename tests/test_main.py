@@ -1,6 +1,7 @@
 """main.py 纯逻辑单元测试（不依赖真实 AstrBot）。"""
 import asyncio
 import json
+from datetime import datetime
 
 import pytest
 
@@ -164,21 +165,20 @@ async def _collect(agen):
 
 
 def test_cmd_push_enable(monkeypatch, tmp_path, plugin):
-    monkeypatch.setattr(main, "WHITELIST_PATH", str(tmp_path / "w.json"))
+    monkeypatch.setattr(main, "PUSH_SETTINGS_PATH", str(tmp_path / "s.json"))
     ev = FakeEvent("/电量推送开启", origin="aiocqhttp:GroupMessage:2001")
     results = asyncio.run(_collect(plugin.cmd_push_enable(ev)))
-    assert plugin._whitelist["aiocqhttp:GroupMessage:2001"] is True
+    assert plugin._push_settings["aiocqhttp:GroupMessage:2001"]["enabled"] is True
     assert "开启" in results[0]
-    import json
-    data = json.loads((tmp_path / "w.json").read_text())
-    assert data["aiocqhttp:GroupMessage:2001"] is True
+    data = json.loads((tmp_path / "s.json").read_text())
+    assert data["aiocqhttp:GroupMessage:2001"]["enabled"] is True
 
 
 def test_cmd_push_disable(monkeypatch, tmp_path, plugin):
-    monkeypatch.setattr(main, "WHITELIST_PATH", str(tmp_path / "w.json"))
+    monkeypatch.setattr(main, "PUSH_SETTINGS_PATH", str(tmp_path / "s.json"))
     ev = FakeEvent("/电量推送关闭", origin="aiocqhttp:GroupMessage:2001")
     results = asyncio.run(_collect(plugin.cmd_push_disable(ev)))
-    assert plugin._whitelist["aiocqhttp:GroupMessage:2001"] is False
+    assert plugin._push_settings["aiocqhttp:GroupMessage:2001"]["enabled"] is False
     assert "关闭" in results[0]
 
 
@@ -200,6 +200,99 @@ def test_cmd_push_status_follow_global(plugin):
     assert "跟随全局开关" in text
 
 
+# ---------- 会话级推送配置 ----------
+def test_parse_hours(plugin):
+    assert plugin._parse_hours("8,20") == [8, 20]
+    assert plugin._parse_hours("9, 21") == [9, 21]
+    assert plugin._parse_hours("") == []
+    assert plugin._parse_hours("8,abc,25") == [8]  # 过滤非法值
+
+
+def test_valid_hours(plugin):
+    assert plugin._valid_hours("9,21")
+    assert plugin._valid_hours("8")
+    assert not plugin._valid_hours("")
+    assert not plugin._valid_hours("8,abc")
+    assert not plugin._valid_hours("24")
+
+
+def test_session_cron_hours_fallback_global(plugin):
+    plugin.config = FakeAstrBotConfig({"cron_hours": "8,20"})
+    assert plugin._session_cron_hours("aiocqhttp:GroupMessage:2") == [8, 20]
+
+
+def test_session_cron_hours_override(plugin):
+    plugin._push_settings["aiocqhttp:GroupMessage:2"] = {"cron_hours": "9,21"}
+    assert plugin._session_cron_hours("aiocqhttp:GroupMessage:2") == [9, 21]
+
+
+def test_session_warn_threshold_fallback_global(plugin):
+    plugin.config = FakeAstrBotConfig({"warn_threshold": 20})
+    assert plugin._session_warn_threshold("aiocqhttp:GroupMessage:2") == 20.0
+
+
+def test_session_warn_threshold_override(plugin):
+    plugin._push_settings["aiocqhttp:GroupMessage:2"] = {"warn_threshold": 15}
+    assert plugin._session_warn_threshold("aiocqhttp:GroupMessage:2") == 15.0
+
+
+# ---------- 推送控制权限 ----------
+def test_can_control_push_empty_whitelist(plugin):
+    # 白名单为空 -> 任何人可控制
+    ev = FakeEvent("/电量推送关闭", origin="aiocqhttp:GroupMessage:2001", sender_id="u1")
+    assert plugin._can_control_push(ev)
+
+
+def test_can_control_push_whitelisted(plugin):
+    plugin.config = FakeAstrBotConfig({"push_control_whitelist": "10001,10002"})
+    ev = FakeEvent("/电量推送关闭", origin="aiocqhttp:GroupMessage:2001", sender_id="10001")
+    assert plugin._can_control_push(ev)
+
+
+def test_can_control_push_denied(plugin):
+    plugin.config = FakeAstrBotConfig({"push_control_whitelist": "10001"})
+    ev = FakeEvent("/电量推送关闭", origin="aiocqhttp:GroupMessage:2001", sender_id="9999")
+    assert not plugin._can_control_push(ev)
+
+
+def test_cmd_push_enable_denied(plugin):
+    plugin.config = FakeAstrBotConfig({"push_control_whitelist": "10001"})
+    ev = FakeEvent("/电量推送开启", origin="aiocqhttp:GroupMessage:2001", sender_id="9999")
+    results = asyncio.run(_collect(plugin.cmd_push_enable(ev)))
+    assert "无权限" in results[0]
+
+
+def test_cmd_push_hours(monkeypatch, tmp_path, plugin):
+    monkeypatch.setattr(main, "PUSH_SETTINGS_PATH", str(tmp_path / "s.json"))
+    ev = FakeEvent("/电量推送时段 9,21", origin="aiocqhttp:GroupMessage:2001")
+    results = asyncio.run(_collect(plugin.cmd_push_hours(ev)))
+    assert plugin._push_settings["aiocqhttp:GroupMessage:2001"]["cron_hours"] == "9,21"
+    assert "9,21" in results[0]
+
+
+def test_cmd_push_hours_invalid(plugin):
+    ev = FakeEvent("/电量推送时段 abc", origin="aiocqhttp:GroupMessage:2001")
+    results = asyncio.run(_collect(plugin.cmd_push_hours(ev)))
+    assert "格式不正确" in results[0]
+
+
+def test_cmd_push_threshold(monkeypatch, tmp_path, plugin):
+    monkeypatch.setattr(main, "PUSH_SETTINGS_PATH", str(tmp_path / "s.json"))
+    ev = FakeEvent("/电量推送阈值 15", origin="aiocqhttp:GroupMessage:2001")
+    results = asyncio.run(_collect(plugin.cmd_push_threshold(ev)))
+    assert plugin._push_settings["aiocqhttp:GroupMessage:2001"]["warn_threshold"] == 15.0
+    assert "15" in results[0]
+
+
+def test_cmd_push_config_shows_session_override(plugin):
+    plugin._push_settings["aiocqhttp:GroupMessage:2001"] = {
+        "cron_hours": "9,21", "warn_threshold": 15, "enabled": True}
+    ev = FakeEvent("/电量推送配置", origin="aiocqhttp:GroupMessage:2001")
+    results = asyncio.run(_collect(plugin.cmd_push_config(ev)))
+    text = results[0]
+    assert "9,21" in text and "会话级" in text
+
+
 # ---------- 定时播报 ----------
 async def _fake_state(room_id):
     return {"quantity": 55, "quantityunit": "度"}
@@ -207,11 +300,14 @@ async def _fake_state(room_id):
 
 def test_scheduled_report_respects_disabled_session(monkeypatch, tmp_path, plugin):
     monkeypatch.setattr(main, "WHITELIST_PATH", str(tmp_path / "w.json"))
+    monkeypatch.setattr(main, "PUSH_SETTINGS_PATH", str(tmp_path / "s.json"))
     monkeypatch.setattr(main, "USER_DATA_PATH", str(tmp_path / "u.json"))
     origin = "aiocqhttp:GroupMessage:2001"
     (tmp_path / "u.json").write_text(json.dumps(
         {"u1": {"room_id": "r1", "room_name": "4栋 1层 101", "origin": origin}}))
     (tmp_path / "w.json").write_text(json.dumps({origin: False}))
+    plugin.config = FakeAstrBotConfig({"cron_hours": str(datetime.now().hour)})
+    plugin._config_missing = lambda: None
     plugin._get_room_state = _fake_state
     sent = []
     plugin._send = lambda o, t: _noop_append(sent, o, t)
@@ -221,11 +317,13 @@ def test_scheduled_report_respects_disabled_session(monkeypatch, tmp_path, plugi
 
 def test_scheduled_report_pushes_enabled_session(monkeypatch, tmp_path, plugin):
     monkeypatch.setattr(main, "WHITELIST_PATH", str(tmp_path / "w.json"))
+    monkeypatch.setattr(main, "PUSH_SETTINGS_PATH", str(tmp_path / "s.json"))
     monkeypatch.setattr(main, "USER_DATA_PATH", str(tmp_path / "u.json"))
     origin = "aiocqhttp:GroupMessage:2001"
     (tmp_path / "u.json").write_text(json.dumps(
         {"u1": {"room_id": "r1", "room_name": "4栋 1层 101", "origin": origin}}))
     (tmp_path / "w.json").write_text(json.dumps({origin: True}))
+    plugin.config = FakeAstrBotConfig({"cron_hours": str(datetime.now().hour)})
     plugin._config_missing = lambda: None
     plugin._get_room_state = _fake_state
     sent = []
@@ -236,6 +334,7 @@ def test_scheduled_report_pushes_enabled_session(monkeypatch, tmp_path, plugin):
 
 def test_scheduled_report_dedup_same_room(monkeypatch, tmp_path, plugin):
     monkeypatch.setattr(main, "WHITELIST_PATH", str(tmp_path / "w.json"))
+    monkeypatch.setattr(main, "PUSH_SETTINGS_PATH", str(tmp_path / "s.json"))
     monkeypatch.setattr(main, "USER_DATA_PATH", str(tmp_path / "u.json"))
     origin = "aiocqhttp:GroupMessage:2001"
     (tmp_path / "u.json").write_text(json.dumps({
@@ -243,9 +342,31 @@ def test_scheduled_report_dedup_same_room(monkeypatch, tmp_path, plugin):
         "u2": {"room_id": "r1", "room_name": "4栋 1层 101", "origin": origin},
     }))
     (tmp_path / "w.json").write_text(json.dumps({origin: True}))
+    plugin.config = FakeAstrBotConfig({"cron_hours": str(datetime.now().hour)})
     plugin._config_missing = lambda: None
     plugin._get_room_state = _fake_state
     sent = []
     plugin._send = lambda o, t: _noop_append(sent, o, t)
     asyncio.run(plugin._scheduled_report())
     assert len(sent) == 1
+
+
+def test_scheduled_report_skips_out_of_session_hours(monkeypatch, tmp_path, plugin):
+    monkeypatch.setattr(main, "WHITELIST_PATH", str(tmp_path / "w.json"))
+    monkeypatch.setattr(main, "PUSH_SETTINGS_PATH", str(tmp_path / "s.json"))
+    monkeypatch.setattr(main, "USER_DATA_PATH", str(tmp_path / "u.json"))
+    origin = "aiocqhttp:GroupMessage:2001"
+    (tmp_path / "u.json").write_text(json.dumps(
+        {"u1": {"room_id": "r1", "room_name": "4栋 1层 101", "origin": origin}}))
+    (tmp_path / "w.json").write_text(json.dumps({origin: True}))
+    # 会话级时段设为不包含当前小时（取当前小时+1，若为23则取0）
+    other_hour = (datetime.now().hour + 1) % 24
+    (tmp_path / "s.json").write_text(json.dumps(
+        {origin: {"enabled": True, "cron_hours": str(other_hour)}}))
+    plugin.config = FakeAstrBotConfig({"cron_hours": str(datetime.now().hour)})
+    plugin._config_missing = lambda: None
+    plugin._get_room_state = _fake_state
+    sent = []
+    plugin._send = lambda o, t: _noop_append(sent, o, t)
+    asyncio.run(plugin._scheduled_report())
+    assert sent == []

@@ -58,5 +58,11 @@
     "type": "boolean",
     "default": true,
     "hint": "关闭后，未在会话中显式开启的群聊将不推送；可用 /电量推送开启 单独开启某个群"
+  },
+  "push_control_whitelist": {
+    "description": "可控制推送开关的用户 ID 白名单（逗号分隔）",
+    "type": "string",
+    "default": "",
+    "hint": "留空表示任何绑定用户都可开启/关闭推送；填写后仅这些用户 ID 及机器人管理员可控制（如 10001,10002）"
   }
 }

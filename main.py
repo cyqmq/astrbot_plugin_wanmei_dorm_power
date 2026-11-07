@@ -12,6 +12,9 @@
   /电量解绑                   清空自己的绑定
   /电量推送                   在当前会话订阅每日定时播报
   /电量推送开启 / 关闭 / 状态   启用、关闭或查看当前会话（群聊/私聊）的定时推送
+  /电量推送时段 <小时>         设置当前会话推送时段，如 /电量推送时段 9,21
+  /电量推送阈值 <度数>         设置当前会话低电量预警阈值，如 /电量推送阈值 15
+  /电量推送配置               查看当前会话推送配置（时段/阈值/来源）
 
 数据保存在 AstrBot 数据目录 data/plugin_data/<插件名>/users.json。
 """
@@ -21,6 +24,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime
 
 import aiohttp
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -77,6 +81,7 @@ DATA_DIR = _resolve_data_dir()
 USER_DATA_PATH = os.path.join(DATA_DIR, "users.json")
 WHITELIST_PATH = os.path.join(DATA_DIR, "push_whitelist.json")
 ROOM_NAME_PATH = os.path.join(DATA_DIR, "room_names.json")
+PUSH_SETTINGS_PATH = os.path.join(DATA_DIR, "push_settings.json")
 
 
 def _now_ts() -> str:
@@ -95,7 +100,7 @@ class _PickError(ValueError):
     "astrbot_plugin_wanmei_dorm_power",
     "cyqmq",
     "宿舍电量提醒（完美校园云支付接口）",
-    "1.5.0",
+    "1.6.0",
 )
 class DormPowerCpPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig | None = None):
@@ -105,11 +110,14 @@ class DormPowerCpPlugin(Star):
         self._users: dict[str, dict] = {}
         # 推送白名单：origin -> True(显式开启) / False(显式关闭)；不在其中则跟随全局开关
         self._whitelist: dict[str, bool] = {}
+        # 会话级推送配置：origin -> {cron_hours, warn_threshold, enabled}
+        self._push_settings: dict[str, dict] = {}
         # 房间ID -> 友好名（如「4栋 1层 101」），绑定后展示用
         self._room_names: dict[str, str] = {}
         self._session: aiohttp.ClientSession | None = None
         self._load_users()
         self._load_whitelist()
+        self._load_push_settings()
         self._load_room_names()
 
     # ---------- 配置读取 ----------
@@ -163,6 +171,12 @@ class DormPowerCpPlugin(Star):
         """全局是否允许群聊会话接收定时推送。"""
         return bool(self._cfg("group_push_enabled", True))
 
+    @property
+    def _push_control_whitelist(self) -> set[str]:
+        """可控制推送开关的用户 ID 白名单；为空表示任何绑定用户都可控制（兼容旧行为）。"""
+        raw = str(self._cfg("push_control_whitelist", "") or "")
+        return {s.strip() for s in re.split(r"[,，、\s]+", raw) if s.strip()}
+
     # ---------- 推送开关判定 ----------
     @staticmethod
     def _session_is_private(origin: str) -> bool:
@@ -175,14 +189,75 @@ class DormPowerCpPlugin(Star):
     def _push_enabled_for(self, origin: str) -> bool:
         """判断某会话当前是否允许接收推送。
 
-        优先级：会话白名单显式设置 > 全局私聊/群聊开关。
+        优先级：会话级配置 enabled > 旧版白名单显式设置 > 全局私聊/群聊开关。
         """
+        settings = self._push_settings.get(origin)
+        if settings and "enabled" in settings:
+            return bool(settings["enabled"])
         override = self._whitelist.get(origin)
         if override is not None:
             return override
         if self._session_is_private(origin):
             return self._private_push_enabled
         return self._group_push_enabled
+
+    # ---------- 会话级推送配置 ----------
+    def _session_setting(self, origin: str, key: str):
+        """取某会话的推送配置项；未设置时返回 None。"""
+        return (self._push_settings.get(origin) or {}).get(key)
+
+    def _session_cron_hours(self, origin: str) -> list[int]:
+        """取某会话的推送时段（小时列表），未设置则用全局 cron_hours。"""
+        raw = self._session_setting(origin, "cron_hours")
+        if not raw:
+            raw = str(self._cfg("cron_hours", "8,20") or "8,20")
+        return self._parse_hours(raw)
+
+    def _session_warn_threshold(self, origin: str) -> float:
+        """取某会话的低电量阈值，未设置则用全局 warn_threshold。"""
+        raw = self._session_setting(origin, "warn_threshold")
+        if raw is None:
+            return self._warn_threshold
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return self._warn_threshold
+
+    @staticmethod
+    def _parse_hours(raw: str) -> list[int]:
+        """解析 "8,20" / "8, 20" 为 [8, 20]，过滤非法值。"""
+        hours = []
+        for part in re.split(r"[,，、\s]+", str(raw or "")):
+            part = part.strip()
+            if part.isdigit() and 0 <= int(part) <= 23:
+                hours.append(int(part))
+        return sorted(set(hours))
+
+    @staticmethod
+    def _valid_hours(raw: str) -> bool:
+        """校验时段字符串是否全部为合法小时。"""
+        parts = [p.strip() for p in re.split(r"[,，、\s]+", str(raw or "")) if p.strip()]
+        return bool(parts) and all(
+            p.isdigit() and 0 <= int(p) <= 23 for p in parts
+        )
+
+    def _can_control_push(self, event: AstrMessageEvent) -> bool:
+        """判断当前用户是否有权控制本会话推送开关。
+
+        配置 push_control_whitelist 为空时任何绑定用户均可控制（兼容旧行为）；
+        否则仅白名单用户或机器人管理员可控制。
+        """
+        admins = self._push_control_whitelist
+        if not admins:
+            return True
+        if event.get_sender_id() in admins:
+            return True
+        try:
+            if event.is_admin():
+                return True
+        except Exception:
+            pass
+        return False
 
     # ---------- HTTP 调用 ----------
     def _ensure_session(self) -> aiohttp.ClientSession:
@@ -269,6 +344,30 @@ class DormPowerCpPlugin(Star):
                 json.dump(self._whitelist, f, ensure_ascii=False, indent=2)
         except OSError as e:
             logger.error(f"[{PLUGIN_NAME}] 推送白名单保存失败: {e}")
+
+    # ---------- 会话级推送配置 ----------
+    def _load_push_settings(self):
+        try:
+            with open(PUSH_SETTINGS_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            self._push_settings = {
+                str(k): dict(v) for k, v in data.items() if isinstance(v, dict)
+            }
+        except Exception:
+            self._push_settings = {}
+
+    def _save_push_settings(self):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            with open(PUSH_SETTINGS_PATH, "w", encoding="utf-8") as f:
+                json.dump(self._push_settings, f, ensure_ascii=False, indent=2)
+        except OSError as e:
+            logger.error(f"[{PLUGIN_NAME}] 推送配置保存失败: {e}")
+
+    def _set_session_enabled(self, origin: str, enabled: bool):
+        """设置某会话推送开关（写入会话级配置）。"""
+        self._push_settings.setdefault(origin, {})["enabled"] = enabled
+        self._save_push_settings()
 
     # ---------- 房间友好名缓存 ----------
     def _load_room_names(self):
@@ -377,12 +476,14 @@ class DormPowerCpPlugin(Star):
         )
 
     # ---------- 格式化电量 ----------
-    def _format_quantity(self, state: dict, room_name: str) -> str:
+    def _format_quantity(self, state: dict, room_name: str, threshold: float | None = None) -> str:
         quantity = state.get("quantity")
         unit = state.get("quantityunit", "度")
+        if threshold is None:
+            threshold = self._warn_threshold
         text = f"⚡ {room_name} 剩余电量：{quantity} {unit}"
         try:
-            if float(quantity) <= self._warn_threshold:
+            if float(quantity) <= threshold:
                 text += "\n⚠️ 电量偏低，请及时充值！"
         except (TypeError, ValueError):
             pass
@@ -740,27 +841,31 @@ class DormPowerCpPlugin(Star):
             return
         self._users[uid]["origin"] = event.unified_msg_origin
         self._save_users()
-        self._whitelist[event.unified_msg_origin] = True
-        self._save_whitelist()
-        hours = str(self._cfg("cron_hours", "8,20") or "8,20")
+        self._set_session_enabled(event.unified_msg_origin, True)
+        hours = self._session_cron_hours(event.unified_msg_origin)
+        threshold = self._session_warn_threshold(event.unified_msg_origin)
         yield event.plain_result(
-                f"✅ 已订阅每日定时播报（{hours} 点），本会话推送已开启。"
-                f"电量低于 {self._warn_threshold:g} 度时会额外提醒。"
+                f"✅ 已订阅每日定时播报（{','.join(str(h) for h in hours)} 点），本会话推送已开启。"
+                f"电量低于 {threshold:g} 度时会额外提醒。"
             )
 
     # ---------- 命令：推送开关 ----------
     @filter.command("电量推送开启")
     async def cmd_push_enable(self, event: AstrMessageEvent):
         """启用当前会话（群聊/私聊）的定时推送"""
-        self._whitelist[event.unified_msg_origin] = True
-        self._save_whitelist()
+        if not self._can_control_push(event):
+            yield event.plain_result("无权限：仅推送管理白名单中的用户可开启本会话推送。")
+            return
+        self._set_session_enabled(event.unified_msg_origin, True)
         yield event.plain_result("本会话推送已开启。")
 
     @filter.command("电量推送关闭")
     async def cmd_push_disable(self, event: AstrMessageEvent):
         """关闭当前会话（群聊/私聊）的定时推送"""
-        self._whitelist[event.unified_msg_origin] = False
-        self._save_whitelist()
+        if not self._can_control_push(event):
+            yield event.plain_result("无权限：仅推送管理白名单中的用户可关闭本会话推送。")
+            return
+        self._set_session_enabled(event.unified_msg_origin, False)
         yield event.plain_result("本会话推送已关闭。")
 
     @filter.command("电量推送状态")
@@ -770,17 +875,86 @@ class DormPowerCpPlugin(Star):
         private = self._session_is_private(origin)
         scope = "私聊" if private else "群聊"
         enabled = self._push_enabled_for(origin)
-        override = self._whitelist.get(origin)
-        if override is not None:
-            mode = f"本会话已显式{'开启' if override else '关闭'}"
+        settings = self._push_settings.get(origin)
+        if settings and "enabled" in settings:
+            mode = f"本会话已显式{'开启' if settings['enabled'] else '关闭'}"
+        elif origin in self._whitelist:
+            mode = f"本会话已显式{'开启' if self._whitelist[origin] else '关闭'}"
         else:
             mode = "跟随全局开关"
         global_switch = self._private_push_enabled if private else self._group_push_enabled
+        hours = self._session_cron_hours(origin)
+        threshold = self._session_warn_threshold(origin)
         yield event.plain_result(
             f"当前会话：{scope}\n"
             f"本会话推送：{'开启' if enabled else '关闭'}\n"
             f"设置模式：{mode}\n"
+            f"推送时段：{','.join(str(h) for h in hours)} 点\n"
+            f"低电量阈值：{threshold:g} 度\n"
             f"全局{scope}推送开关：{'开启' if global_switch else '关闭'}"
+        )
+
+    # ---------- 命令：会话级推送配置 ----------
+    @filter.command("电量推送时段")
+    async def cmd_push_hours(self, event: AstrMessageEvent):
+        """设置当前会话推送时段：/电量推送时段 <小时>"""
+        if not self._can_control_push(event):
+            yield event.plain_result("无权限：仅推送管理白名单中的用户可修改本会话推送时段。")
+            return
+        args = self._args(event, "电量推送时段")
+        if not args:
+            yield event.plain_result(
+                "用法：/电量推送时段 <小时>，如 /电量推送时段 9,21（每天 9:00 和 21:00 播报）。"
+            )
+            return
+        raw = ",".join(args)
+        if not self._valid_hours(raw):
+            yield event.plain_result(f"时段格式不正确：{raw}（示例 9,21）。")
+            return
+        self._push_settings.setdefault(event.unified_msg_origin, {})["cron_hours"] = raw
+        self._save_push_settings()
+        hours = self._parse_hours(raw)
+        yield event.plain_result(f"本会话推送时段已设为 {','.join(str(h) for h in hours)} 点。")
+
+    @filter.command("电量推送阈值")
+    async def cmd_push_threshold(self, event: AstrMessageEvent):
+        """设置当前会话低电量预警阈值：/电量推送阈值 <度数>"""
+        if not self._can_control_push(event):
+            yield event.plain_result("无权限：仅推送管理白名单中的用户可修改本会话推送阈值。")
+            return
+        args = self._args(event, "电量推送阈值")
+        if not args:
+            yield event.plain_result(
+                "用法：/电量推送阈值 <度数>，如 /电量推送阈值 15（电量低于 15 度时提醒）。"
+            )
+            return
+        try:
+            value = float(args[0])
+        except (TypeError, ValueError):
+            yield event.plain_result(f"阈值格式不正确：{args[0]}（请输入数字）。")
+            return
+        if value < 0:
+            yield event.plain_result("阈值不能为负数。")
+            return
+        self._push_settings.setdefault(event.unified_msg_origin, {})["warn_threshold"] = value
+        self._save_push_settings()
+        yield event.plain_result(f"本会话低电量预警阈值已设为 {value:g} 度。")
+
+    @filter.command("电量推送配置")
+    async def cmd_push_config(self, event: AstrMessageEvent):
+        """查看当前会话推送配置"""
+        origin = event.unified_msg_origin
+        hours = self._session_cron_hours(origin)
+        threshold = self._session_warn_threshold(origin)
+        enabled = self._push_enabled_for(origin)
+        settings = self._push_settings.get(origin)
+        hour_src = "会话级" if (settings or {}).get("cron_hours") else "全局"
+        thr_src = "会话级" if (settings or {}).get("warn_threshold") is not None else "全局"
+        yield event.plain_result(
+            f"推送配置（{origin}）\n"
+            f"推送开关：{'开启' if enabled else '关闭'}\n"
+            f"推送时段：{','.join(str(h) for h in hours)} 点（{hour_src}）\n"
+            f"低电量阈值：{threshold:g} 度（{thr_src}）"
         )
 
     # ---------- LLM 自然语言工具 ----------
@@ -814,11 +988,13 @@ class DormPowerCpPlugin(Star):
     async def initialize(self):
         auto = self._try_auto_configure()
         hours = str(self._cfg("cron_hours", "8,20") or "8,20")
-        self.scheduler.add_job(self._scheduled_report, "cron", hour=hours, minute=0)
+        # 每小时整点触发一次，内部按各会话的时段判断是否播报，支持会话级时段配置
+        self.scheduler.add_job(self._scheduled_report, "cron", hour="*", minute=0)
         self.scheduler.start()
         logger.info(
-            f"[{PLUGIN_NAME}] 插件已加载，定时播报小时: {hours}，"
+            f"[{PLUGIN_NAME}] 插件已加载，默认播报小时: {hours}，"
             f"已绑定用户: {len(self._users)}，白名单会话: {len(self._whitelist)}，"
+            f"会话级配置: {len(self._push_settings)}，"
             f"自动解析配置: {'成功' if auto else '未触发'}"
         )
 
@@ -835,24 +1011,34 @@ class DormPowerCpPlugin(Star):
             return
         self._load_users()
         self._load_whitelist()
-        # 同一会话（如一个群）里多人绑定同一房间时只播报一次，避免重复刷屏；
-        # 仅推送允许的会话（白名单 + 全局私聊/群聊开关）
-        sent: set[tuple[str, str]] = set()
-        for uid, info in self._users.items():
+        self._load_push_settings()
+        now_hour = datetime.now().hour
+        # 按会话分组：同一会话内多人绑定同一房间只播报一次，避免重复刷屏
+        by_origin: dict[str, list[dict]] = {}
+        for info in self._users.values():
             origin = info.get("origin")
             room_id = info.get("room_id")
             if not origin or not room_id:
                 continue
+            by_origin.setdefault(origin, []).append(info)
+        for origin, infos in by_origin.items():
+            # 仅推送允许的会话（会话级配置 + 白名单 + 全局私聊/群聊开关）
             if not self._push_enabled_for(origin):
                 continue
-            key = (origin, room_id)
-            if key in sent:
+            # 当前小时在会话时段内才播报
+            if now_hour not in self._session_cron_hours(origin):
                 continue
-            sent.add(key)
-            try:
-                state = await self._get_room_state(room_id)
-                name = (info.get("room_name") or self._room_names.get(room_id) or room_id)
-                text = self._format_quantity(state, name)
-                await self._send(origin, text)
-            except Exception as e:
-                logger.error(f"[{PLUGIN_NAME}] 定时播报失败: {e}")
+            threshold = self._session_warn_threshold(origin)
+            sent_rooms: set[str] = set()
+            for info in infos:
+                room_id = info["room_id"]
+                if room_id in sent_rooms:
+                    continue
+                sent_rooms.add(room_id)
+                try:
+                    state = await self._get_room_state(room_id)
+                    name = (info.get("room_name") or self._room_names.get(room_id) or room_id)
+                    text = self._format_quantity(state, name, threshold)
+                    await self._send(origin, text)
+                except Exception as e:
+                    logger.error(f"[{PLUGIN_NAME}] 定时播报失败: {e}")
